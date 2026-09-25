@@ -8,14 +8,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
 
 # Find or fetch pybind11
-find_package(pybind11 CONFIG QUIET)
+# 2.12 is the minimum that supports Python 3.11+ (older releases fail with
+# "invalid use of incomplete type 'PyFrameObject'"). Requiring the version here
+# makes an outdated system pybind11 fall through to the fetch below instead of
+# being used.
+find_package(pybind11 2.12 CONFIG QUIET)
 if(NOT pybind11_FOUND)
-    message(STATUS "pybind11 not found, fetching from GitHub...")
+    message(STATUS "pybind11 >= 2.12 not found, fetching from GitHub...")
     include(FetchContent)
     FetchContent_Declare(
         pybind11
         GIT_REPOSITORY https://github.com/pybind/pybind11.git
-        GIT_TAG v2.11.1
+        GIT_TAG v2.13.6
     )
     FetchContent_MakeAvailable(pybind11)
 endif()

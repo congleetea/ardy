@@ -23,7 +23,7 @@ from ardy.model.loading import get_env_var
 from ardy.model.registry import resolve_model_name
 from ardy.motion_rep.tools import length_to_mask
 from ardy.postprocess import post_process_motion
-from ardy.skeleton import SOMASkeleton30
+from ardy.skeleton import CoreSkeleton27, SOMASkeleton30
 from ardy.tools import seed_everything, to_numpy
 
 
@@ -156,6 +156,37 @@ def _select_sample(output: dict, index: int, n_samples: int) -> dict:
     }
 
 
+def retarget_core27(skeleton, output: dict) -> tuple[dict, dict]:
+    """Retarget a batched Core27 output dict to SOMA30 and SOMA77, sample by sample.
+
+    Core27 is *not* a subset of SOMA, so this is a real conversion:
+    Core27 -> SOMA30 (bone-level IK retarget) -> SOMA77 (relaxed hands + FK),
+    see `CoreSkeleton27.to_SOMASkeleton30` /
+    `SOMASkeleton30.output_to_SOMASkeleton77`.  The IK runs once per sample and
+    both variants are derived from it.  Fields the conversion does not produce
+    (e.g. `smooth_root_pos`) are kept as-is.
+    """
+    n_samples = int(output["posed_joints"].shape[0])
+    outs30, outs77 = [], []
+    for i in range(n_samples):
+        sample = _select_sample(output, i, n_samples)
+        fps = sample.get("fps", None)
+        out30 = skeleton.to_SOMASkeleton30(
+            sample["posed_joints"],
+            fps=float(np.asarray(fps).reshape(-1)[0]) if fps is not None else None,
+            foot_contacts=sample.get("foot_contacts", None),
+        )
+        out77 = skeleton.somaskel30.output_to_SOMASkeleton77(out30, preserve_pos=True)
+
+        outs30.append({**{k: v for k, v in sample.items() if k not in out30}, **out30})
+        outs77.append({**{k: v for k, v in sample.items() if k not in out77}, **out77})
+
+    def stack(items: list) -> dict:
+        return {k: torch.stack([c[k] for c in items]) for k in items[0]}
+
+    return stack(outs30), stack(outs77)
+
+
 def save_motion_npz(path: str, motion_dict: dict, fps: float, text: str) -> None:
     """Save a motion output dict to ``.npz`` along with fps and the prompt."""
     arrays = {k: np.asarray(v) for k, v in motion_dict.items()}
@@ -278,27 +309,46 @@ def main():
     if isinstance(model.skeleton, SOMASkeleton30):
         output = model.skeleton.output_to_SOMASkeleton77(output)
 
-    output = to_numpy(output)
+    # Which skeletons to write: (filename suffix, motion dict).  The first entry
+    # is the primary output (what the external API expects: somaskel77).
+    variants = [("", output)]
+
+    # Core27: always save the native 27-joint skeleton plus both SOMA variants, with
+    # somaskel77 as the primary output.  All three carry an explicit skeleton suffix
+    # so the joint count is unambiguous.
+    if isinstance(model.skeleton, CoreSkeleton27):
+        print("Retargeting Core27 to somaskel30 / somaskel77")
+        out30, out77 = retarget_core27(model.skeleton, output)
+        variants = [("_soma77", out77), ("_core27", output), ("_soma30", out30)]
+        stats = model.skeleton.last_stats.get("per_joint_cm", {})
+        if stats:
+            keys = ("LeftHand", "RightHand", "LeftFoot", "RightFoot", "Head", "Chest")
+            print("  IK error (cm): "
+                  + "  ".join(f"{k}={stats[k]:.2f}" for k in keys if k in stats))
+
+    np_variants = [(suffix, to_numpy(motion)) for suffix, motion in variants]
+    output = np_variants[0][1]
 
     n_samples = int(output["posed_joints"].shape[0])
     # Parse the output stem once; all formats (NPZ, CSV) use this base name.
     output_base = _resolve_output_base(args.output)
 
     # Save the NPZ output
-    if n_samples == 1:
-        npz_path = _single_file_path(output_base, ".npz")
-        print(f"Saving the npz output to {npz_path}")
-        save_motion_npz(npz_path, _select_sample(output, 0, n_samples), fps, text)
-    else:
-        out_dir, _, base_name = _output_dir_and_path(output_base, "motion", ".npz")
-        print(f"Saving the npz output to {out_dir}/ ({base_name}_00.npz ...)")
-        for i in range(n_samples):
-            save_motion_npz(
-                os.path.join(out_dir, f"{base_name}_{i:02d}.npz"),
-                _select_sample(output, i, n_samples),
-                fps,
-                text,
-            )
+    for suffix, motion in np_variants:
+        if n_samples == 1:
+            npz_path = _single_file_path(output_base + suffix, ".npz")
+            print(f"Saving the npz output to {npz_path}")
+            save_motion_npz(npz_path, _select_sample(motion, 0, n_samples), fps, text)
+        else:
+            out_dir, _, base_name = _output_dir_and_path(output_base + suffix, "motion", ".npz")
+            print(f"Saving the npz output to {out_dir}/ ({base_name}_00.npz ...)")
+            for i in range(n_samples):
+                save_motion_npz(
+                    os.path.join(out_dir, f"{base_name}_{i:02d}.npz"),
+                    _select_sample(motion, i, n_samples),
+                    fps,
+                    text,
+                )
 
     # Save the CSV output (MuJoCo qpos) for G1
     if "g1" in resolved_model.lower():

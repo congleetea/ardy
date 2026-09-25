@@ -18,6 +18,30 @@ class CMakeExtension(Extension):
 
 
 class CMakeBuild(build_ext):
+    @staticmethod
+    def _pybind11_cmake_dir():
+        """Path to the pybind11 CMake config of the current Python env, if usable.
+
+        A system-wide pybind11 (e.g. 2.9.x shipped by distro packages) is too old
+        for Python >= 3.11 and breaks the build, so prefer the one installed in
+        the (build) environment and only accept it if it is new enough.
+        """
+        try:
+            from pybind11 import __version__
+            from pybind11 import get_cmake_dir
+        except ImportError:
+            return None
+
+        try:
+            major, minor = (int(p) for p in __version__.split(".")[:2])
+        except ValueError:
+            return None
+
+        if (major, minor) < (2, 12):
+            return None
+
+        return str(get_cmake_dir())
+
     def run(self):
         try:
             subprocess.check_output(["cmake", "--version"])
@@ -34,6 +58,15 @@ class CMakeBuild(build_ext):
             f"-DPYTHON_EXECUTABLE={sys.executable}",
             f"-DPython3_EXECUTABLE={sys.executable}",
         ]
+
+        pybind11_cmake_dir = self._pybind11_cmake_dir()
+        if pybind11_cmake_dir:
+            cmake_args.append(f"-Dpybind11_DIR={pybind11_cmake_dir}")
+        else:
+            self.announce(
+                "pybind11 >= 2.12 not found in the Python environment; CMake will try to fetch it.",
+                level=2,
+            )
 
         cfg = "Debug" if self.debug else "Release"
         build_args = ["--config", cfg]

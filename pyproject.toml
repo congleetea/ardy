@@ -1,5 +1,7 @@
 [build-system]
-requires = ["setuptools>=61.0", "cmake>=3.15"]
+# pybind11 is pinned to 2.x: system installs are often 2.9.x, which does not
+# compile against Python >= 3.11 (incomplete type 'PyFrameObject').
+requires = ["setuptools>=61.0", "cmake>=3.15", "pybind11>=2.12,<3"]
 build-backend = "setuptools.build_meta"
 
 [project]
